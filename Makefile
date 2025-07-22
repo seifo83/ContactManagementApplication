@@ -44,7 +44,7 @@ test:
 
 # 🕵️‍♂️ Vérifier la qualité du code avec PHPStan
 stan:
-	vendor/bin/phpstan analyse src tests
+	vendor/bin/phpstan analyse src tests --memory-limit=512M
 
 # 🧽 Vérifier et corriger le code avec PHP-CS-Fixer (mode dry-run)
 cs:

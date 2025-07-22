@@ -5,6 +5,7 @@ namespace App\Tests\functional\Command;
 use App\Application\Contact\Handler\DeleteOldContactsHandler;
 use App\Application\Contact\Message\DeleteOldContactsMessage;
 use App\Entity\Contact;
+use App\Entity\Organization;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
@@ -26,6 +27,7 @@ class ProcessContactsCommandTest extends KernelTestCase
     private function resetDatabase(): void
     {
         $this->entityManager->createQuery('DELETE FROM App\Entity\Contact')->execute();
+        $this->entityManager->createQuery('DELETE FROM App\Entity\Organization')->execute();
     }
 
     private function loadContactsFixture(string $fixtureFile): void
@@ -33,6 +35,18 @@ class ProcessContactsCommandTest extends KernelTestCase
         $this->resetDatabase();
 
         $targetPath = self::$kernel->getProjectDir().'/files/contacts.csv';
+        copy($fixtureFile, $targetPath);
+
+        $application = new Application(self::$kernel);
+        $command = $application->find('app:update-contact');
+
+        $commandTester = new CommandTester($command);
+        $commandTester->execute([]);
+    }
+
+    private function loadOrganizationsFixture(string $fixtureFile): void
+    {
+        $targetPath = self::$kernel->getProjectDir().'/files/organizations.csv';
         copy($fixtureFile, $targetPath);
 
         $application = new Application(self::$kernel);
@@ -84,5 +98,22 @@ class ProcessContactsCommandTest extends KernelTestCase
 
         $remainingContacts = $this->entityManager->getRepository(Contact::class)->findBy(['deletedAt' => null]);
         $this->assertCount(15, $remainingContacts, 'Il doit rester 15 contacts actifs après suppression');
+    }
+
+    public function testProcessOrganizationsPersistsData(): void
+    {
+        $fixtureFile = self::$kernel->getProjectDir().'/tests/fixtures/valid_organizations.csv';
+        $this->loadOrganizationsFixture($fixtureFile);
+
+        $organizations = $this->entityManager->getRepository(Organization::class)->findAll();
+        $this->assertGreaterThan(0, count($organizations), 'Organizations should be persisted in DB');
+
+        /** @var Organization $organization */
+        $organization = $organizations[0];
+
+        $this->assertNotEmpty($organization->name, 'Organization name should not be empty');
+        $this->assertNotNull($organization->technicalId, 'Organization technicalId should not be null');
+        $this->assertNotNull($organization->emailAddress, 'Organization emailAddress should not be null');
+        $this->assertNotNull($organization->phoneNumber, 'Organization phoneNumber should not be null');
     }
 }

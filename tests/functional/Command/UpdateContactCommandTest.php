@@ -59,7 +59,7 @@ class UpdateContactCommandTest extends KernelTestCase
         echo "\n==========================\n";
 
         $this->assertStringContainsString('Processing Contacts', $output);
-        $this->assertStringContainsString('Created/Updated: 10000', $output);
+        $this->assertStringContainsString('Created/Updated Contact: 10000', $output);
 
         $contacts = $this->entityManager->getRepository(Contact::class)->findAll();
         $this->assertCount(10000, $contacts);

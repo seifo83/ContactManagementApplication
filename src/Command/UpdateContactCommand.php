@@ -4,6 +4,7 @@ namespace App\Command;
 
 use App\Application\Contact\Message\CreateOrUpdateContactMessage;
 use App\Application\Contact\Message\DeleteOldContactsMessage;
+use App\Application\Organization\Message\CreateOrUpdateOrganizationMessage;
 use League\Csv\Exception;
 use League\Csv\Reader;
 use League\Csv\UnavailableStream;
@@ -48,20 +49,21 @@ class UpdateContactCommand extends Command
         $this->io->section('Deleting Contacts');
         $deleteContacts = $this->deleteContacts();
 
-        $this->io->info('Created/Updated: '.$countContacts);
-        $this->io->info('Deleted: '.$deleteContacts);
+        $this->io->info('Created/Updated Contact: '.$countContacts);
+        $this->io->info('Deleted Contact: '.$deleteContacts);
 
         // Process organizations
         // @TODO : Create or update organizations based on the CSV data
         $this->io->section('Processing Organizations');
-        $this->io->info('Created/Updated: 0');
-        $this->io->info('Deleted: 0');
+        $countOrganizations = $this->processOrganizations($output);
+        $this->io->info('Created/Updated Organizations: '.$countOrganizations);
+        $this->io->info('Deleted Organizations: 0');
 
         // Process contact organizations
         // @TODO : Create or update contact organizations based on the CSV data
         $this->io->section('Processing Contact Organizations');
-        $this->io->info('Created/Updated: 0');
-        $this->io->info('Deleted: 0');
+        $this->io->info('Created/Updated Contact Organizations: 0');
+        $this->io->info('Deleted Contact Organizations: 0');
 
         return Command::SUCCESS;
     }
@@ -125,5 +127,48 @@ class UpdateContactCommand extends Command
         }
 
         return 0;
+    }
+
+    /**
+     * @throws UnavailableStream
+     * @throws Exception
+     */
+    private function processOrganizations(OutputInterface $output): int
+    {
+        $this->io->writeln('Updating organizations');
+        $progress = new ProgressBar($output);
+        $progress->setFormat('debug_nomax');
+
+        $count = 0;
+        $batchSize = 100;
+        $reader = Reader::createFromPath('files/organizations.csv');
+
+        $reader->setHeaderOffset(0);
+        $records = $reader->getRecords();
+
+        foreach ($records as $lineNumber => $item) {
+            $progress->advance();
+
+            try {
+                $this->messageBus->dispatch(
+                    new CreateOrUpdateOrganizationMessage($item, $lineNumber + 1)
+                );
+                ++$count;
+            } catch (\Throwable $e) {
+                $this->io->error(sprintf(
+                    'Erreur ligne %d (organizations.csv) : %s',
+                    $lineNumber + 1,
+                    $e->getMessage()
+                ));
+            }
+
+            if (0 === $count % $batchSize) {
+                gc_collect_cycles();
+            }
+        }
+
+        $progress->finish();
+
+        return $count;
     }
 }

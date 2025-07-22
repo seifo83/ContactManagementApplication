@@ -40,7 +40,7 @@ test-db:
 
 # 🧪 Lancer les tests
 test:
-	APP_ENV=test php bin/phpunit
+	APP_ENV=test php -d memory_limit=512M bin/phpunit
 
 # 🕵️‍♂️ Vérifier la qualité du code avec PHPStan
 stan:

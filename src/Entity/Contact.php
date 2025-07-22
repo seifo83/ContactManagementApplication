@@ -59,4 +59,26 @@ class Contact implements HashableInterface
     {
         $this->organizations = new ArrayCollection();
     }
+
+    /**
+     * @return Collection<int, Organization>
+     */
+    public function getOrganizations(): Collection
+    {
+        return $this->organizations;
+    }
+
+    public function addOrganization(Organization $organization): void
+    {
+        if (!$this->organizations->contains($organization)) {
+            $this->organizations->add($organization);
+        }
+    }
+
+    public function removeOrganization(Organization $organization): void
+    {
+        if ($this->organizations->contains($organization)) {
+            $this->organizations->removeElement($organization);
+        }
+    }
 }

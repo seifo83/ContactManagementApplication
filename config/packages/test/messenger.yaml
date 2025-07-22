@@ -1,8 +1,0 @@
-framework:
-    messenger:
-        transports:
-            async: 'sync://'
-
-        routing:
-            'App\Application\Contact\Message\CreateOrUpdateContactMessage': async
-            'App\Application\Contact\Message\DeleteOldContactsMessage': async

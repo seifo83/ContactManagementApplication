@@ -4,6 +4,7 @@ namespace App\Command;
 
 use App\Application\Contact\Message\CreateOrUpdateContactMessage;
 use App\Application\Contact\Message\DeleteOldContactsMessage;
+use App\Application\ContactOrganization\Message\ProcessChunkMessage;
 use App\Application\Organization\Message\CreateOrUpdateOrganizationMessage;
 use League\Csv\Exception;
 use League\Csv\Reader;
@@ -42,6 +43,12 @@ class UpdateContactCommand extends Command
     {
         $this->io = new SymfonyStyle($input, $output);
 
+        $memoryLimit = $_ENV['APP_MEMORY_LIMIT'] ?? null;
+        if ($memoryLimit) {
+            ini_set('memory_limit', $memoryLimit);
+            $this->io->note(sprintf('Limite mémoire fixée à %s', $memoryLimit));
+        }
+
         // Process contacts
         $this->io->section('Processing Contacts');
         $countContacts = $this->processContacts($output);
@@ -49,20 +56,21 @@ class UpdateContactCommand extends Command
         $this->io->section('Deleting Contacts');
         $deleteContacts = $this->deleteContacts();
 
-        $this->io->info('Created/Updated Contact: '.$countContacts);
-        $this->io->info('Deleted Contact: '.$deleteContacts);
+        $this->io->info('Created/Updated Contact: ' . $countContacts);
+        $this->io->info('Deleted Contact: ' . $deleteContacts);
 
         // Process organizations
         // @TODO : Create or update organizations based on the CSV data
         $this->io->section('Processing Organizations');
         $countOrganizations = $this->processOrganizations($output);
-        $this->io->info('Created/Updated Organizations: '.$countOrganizations);
+        $this->io->info('Created/Updated Organizations: ' . $countOrganizations);
         $this->io->info('Deleted Organizations: 0');
 
         // Process contact organizations
         // @TODO : Create or update contact organizations based on the CSV data
         $this->io->section('Processing Contact Organizations');
-        $this->io->info('Created/Updated Contact Organizations: 0');
+        $countContactOrganizations = $this->processContactOrganizations($output);
+        $this->io->info('Created/Updated Contact Organizations: ' . $countContactOrganizations);
         $this->io->info('Deleted Contact Organizations: 0');
 
         return Command::SUCCESS;
@@ -123,7 +131,7 @@ class UpdateContactCommand extends Command
                 return $handled->getResult();
             }
         } catch (\Throwable $e) {
-            $this->io->error('Erreur lors de la suppression des anciens contacts : '.$e->getMessage());
+            $this->io->error('Erreur lors de la suppression des anciens contacts : ' . $e->getMessage());
         }
 
         return 0;
@@ -168,6 +176,58 @@ class UpdateContactCommand extends Command
         }
 
         $progress->finish();
+
+        return $count;
+    }
+
+    /**
+     * @throws UnavailableStream
+     * @throws Exception
+     */
+    private function processContactOrganizations(OutputInterface $output): int
+    {
+        $this->io->writeln('Updating contact organizations');
+        $reader = Reader::createFromPath('files/contacts_organizations.csv');
+        $reader->setHeaderOffset(0);
+        $records = iterator_to_array($reader->getRecords());
+
+        $chunkSize = 1000;
+        $chunks = array_chunk($records, $chunkSize);
+        $totalChunks = count($chunks);
+
+        $progress = new ProgressBar($output, $totalChunks);
+        $progress->setFormat(
+            ' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %memory:6s% | %message%'
+        );
+        $progress->start();
+
+        $count = 0;
+
+        foreach ($chunks as $chunkNumber => $chunk) {
+            try {
+                $this->messageBus->dispatch(
+                    new ProcessChunkMessage($chunk, $chunkNumber)
+                );
+                $count += count($chunk);
+
+                $progress->setMessage(sprintf(
+                    'Chunk #%d dispatché (%d lignes)',
+                    $chunkNumber + 1,
+                    count($chunk)
+                ));
+            } catch (\Throwable $e) {
+                $this->io->warning(sprintf(
+                    'Erreur lors du dispatch du chunk #%d : %s',
+                    $chunkNumber + 1,
+                    $e->getMessage()
+                ));
+            }
+
+            $progress->advance();
+        }
+
+        $progress->finish();
+        $this->io->newLine(2);
 
         return $count;
     }

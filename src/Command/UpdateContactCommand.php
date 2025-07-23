@@ -4,9 +4,9 @@ namespace App\Command;
 
 use App\Application\Common\Message\ProcessChunkMessage;
 use App\Application\Contact\Message\DeleteOldContactsMessage;
-use League\Csv\Exception;
-use League\Csv\Reader;
-use League\Csv\UnavailableStream;
+use Box\Spout\Common\Exception\IOException;
+use Box\Spout\Reader\Common\Creator\ReaderEntityFactory;
+use Box\Spout\Reader\Exception\ReaderNotOpenedException;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Helper\ProgressBar;
@@ -31,10 +31,6 @@ class UpdateContactCommand extends Command
         $this->messageBus = $messageBus;
     }
 
-    /**
-     * @throws UnavailableStream
-     * @throws Exception
-     */
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $this->io = new SymfonyStyle($input, $output);
@@ -56,121 +52,102 @@ class UpdateContactCommand extends Command
         $this->io->info('Deleted Contact: '.$deleteContacts);
 
         // Process organizations
-        // @TODO : Create or update organizations based on the CSV data
         $this->io->section('Processing Organizations');
         $countOrganizations = $this->processOrganizations($output);
         $this->io->info('Created/Updated Organizations: '.$countOrganizations);
-        $this->io->info('Deleted Organizations: 0');
 
         // Process contact organizations
-        // @TODO : Create or update contact organizations based on the CSV data
         $this->io->section('Processing Contact Organizations');
         $countContactOrganizations = $this->processContactOrganizations($output);
         $this->io->info('Created/Updated Contact Organizations: '.$countContactOrganizations);
-        $this->io->info('Deleted Contact Organizations: 0');
 
         return Command::SUCCESS;
     }
 
     /**
-     * @throws UnavailableStream
-     * @throws Exception
+     * @throws ReaderNotOpenedException
+     * @throws IOException
      */
     private function processContacts(OutputInterface $output): int
     {
-        $this->io->writeln('Updating contacts');
-
-        $reader = Reader::createFromPath('files/contacts.csv');
-        $reader->setHeaderOffset(0);
-        $records = iterator_to_array($reader->getRecords());
-
-        $chunkSize = 1000;
-        $chunks = array_chunk($records, $chunkSize);
-        $totalChunks = count($chunks);
-
-        $progress = new ProgressBar($output, $totalChunks);
-        $progress->setFormat(
-            ' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %memory:6s% | %message%'
-        );
-        $progress->start();
-
-        $count = 0;
-
-        foreach ($chunks as $chunkNumber => $chunk) {
-            try {
-                $this->messageBus->dispatch(
-                    new ProcessChunkMessage($chunk, $chunkNumber, 'contacts')
-                );
-                $count += count($chunk);
-
-                $progress->setMessage(sprintf(
-                    'Chunk #%d dispatché (%d lignes)',
-                    $chunkNumber + 1,
-                    count($chunk)
-                ));
-            } catch (\Throwable $e) {
-                $this->io->warning(sprintf(
-                    'Erreur lors du dispatch du chunk #%d (contacts) : %s',
-                    $chunkNumber + 1,
-                    $e->getMessage()
-                ));
-            }
-
-            $progress->advance();
-        }
-
-        $progress->finish();
-        $this->io->newLine(2);
-
-        return $count;
+        return $this->processCsvFile('files/contacts.csv', 'contacts', $output);
     }
 
     /**
-     * @throws UnavailableStream
-     * @throws Exception
+     * @throws ReaderNotOpenedException
+     * @throws IOException
      */
     private function processOrganizations(OutputInterface $output): int
     {
-        $this->io->writeln('Updating organizations');
-        $reader = Reader::createFromPath('files/organizations.csv');
-        $reader->setHeaderOffset(0);
-        $records = iterator_to_array($reader->getRecords());
+        return $this->processCsvFile('files/organizations.csv', 'organizations', $output);
+    }
+
+    /**
+     * @throws ReaderNotOpenedException
+     * @throws IOException
+     */
+    private function processContactOrganizations(OutputInterface $output): int
+    {
+        return $this->processCsvFile('files/contacts_organizations.csv', 'contact_organizations', $output);
+    }
+
+    /**
+     * @throws ReaderNotOpenedException
+     * @throws IOException
+     */
+    private function processCsvFile(string $filePath, string $type, OutputInterface $output): int
+    {
+        $this->io->writeln("Updating {$type}");
+
+        $reader = ReaderEntityFactory::createCSVReader();
+        $reader->open($filePath);
 
         $chunkSize = 1000;
-        $chunks = array_chunk($records, $chunkSize);
-        $totalChunks = count($chunks);
+        $chunk = [];
+        $chunkNumber = 0;
+        $count = 0;
+        $headers = [];
 
-        $progress = new ProgressBar($output, $totalChunks);
-        $progress->setFormat(
-            ' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %memory:6s% | %message%'
-        );
+        $progress = new ProgressBar($output);
+        $progress->setFormat(' %current% lignes traitées | %elapsed% | %memory% | %message%');
         $progress->start();
 
-        $count = 0;
+        foreach ($reader->getSheetIterator() as $sheet) {
+            foreach ($sheet->getRowIterator() as $rowIndex => $row) {
+                $rowData = $row->toArray();
 
-        foreach ($chunks as $chunkNumber => $chunk) {
-            try {
-                $this->messageBus->dispatch(
-                    new ProcessChunkMessage($chunk, $chunkNumber, 'organizations')
-                );
-                $count += count($chunk);
+                if (1 === $rowIndex) {
+                    $headers = $rowData;
+                    continue;
+                }
 
-                $progress->setMessage(sprintf(
-                    'Chunk #%d dispatché (%d lignes)',
-                    $chunkNumber + 1,
-                    count($chunk)
-                ));
-            } catch (\Throwable $e) {
-                $this->io->warning(sprintf(
-                    'Erreur lors du dispatch du chunk #%d (organizations) : %s',
-                    $chunkNumber + 1,
-                    $e->getMessage()
-                ));
+                $record = array_combine($headers, $rowData);
+                $chunk[] = $record;
+
+                if (count($chunk) >= $chunkSize) {
+                    $this->dispatchChunk($chunk, $chunkNumber, $type, $progress);
+                    $count += count($chunk);
+
+                    $chunk = [];
+                    ++$chunkNumber;
+
+                    $progress->setMessage(sprintf(
+                        'Chunk #%d dispatché (%d lignes traitées)',
+                        $chunkNumber,
+                        $count
+                    ));
+                    $progress->advance($chunkSize);
+                }
             }
-
-            $progress->advance();
         }
 
+        if (!empty($chunk)) {
+            $this->dispatchChunk($chunk, $chunkNumber, $type, $progress);
+            $count += count($chunk);
+            $progress->advance(count($chunk));
+        }
+
+        $reader->close();
         $progress->finish();
         $this->io->newLine(2);
 
@@ -178,61 +155,27 @@ class UpdateContactCommand extends Command
     }
 
     /**
-     * @throws Exception
+     * @param array<array<string, mixed>> $chunk
      */
-    private function processContactOrganizations(OutputInterface $output): int
+    private function dispatchChunk(array $chunk, int $chunkNumber, string $type, ProgressBar $progress): void
     {
-        $this->io->writeln('Updating contact organizations');
-        $reader = Reader::createFromPath('files/contacts_organizations.csv');
-        $reader->setHeaderOffset(0);
-        $records = iterator_to_array($reader->getRecords());
-
-        $chunkSize = 1000;
-        $chunks = array_chunk($records, $chunkSize);
-        $totalChunks = count($chunks);
-
-        $progress = new ProgressBar($output, $totalChunks);
-        $progress->setFormat(
-            ' %current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %memory:6s% | %message%'
-        );
-        $progress->start();
-
-        $count = 0;
-
-        foreach ($chunks as $chunkNumber => $chunk) {
-            try {
-                $this->messageBus->dispatch(
-                    new ProcessChunkMessage($chunk, $chunkNumber, 'contact_organizations')
-                );
-                $count += count($chunk);
-
-                $progress->setMessage(sprintf(
-                    'Chunk #%d dispatché (%d lignes)',
-                    $chunkNumber + 1,
-                    count($chunk)
-                ));
-            } catch (\Throwable $e) {
-                $this->io->warning(sprintf(
-                    'Erreur lors du dispatch du chunk #%d (contact_organizations) : %s',
-                    $chunkNumber + 1,
-                    $e->getMessage()
-                ));
-            }
-
-            $progress->advance();
+        try {
+            $this->messageBus->dispatch(
+                new ProcessChunkMessage($chunk, $chunkNumber, $type)
+            );
+        } catch (\Throwable $e) {
+            $this->io->warning(sprintf(
+                'Erreur lors du dispatch du chunk #%d (%s) : %s',
+                $chunkNumber + 1,
+                $type,
+                $e->getMessage()
+            ));
         }
-
-        $progress->finish();
-        $this->io->newLine(2);
-
-        return $count;
     }
 
     private function deleteContacts(): int
     {
         $this->io->writeln('Deleting contacts');
-
-        // @TODO : Create a query to soft delete contacts if updated_at has not changed since 1 week
 
         try {
             $envelope = $this->messageBus->dispatch(new DeleteOldContactsMessage());

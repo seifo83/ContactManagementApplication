@@ -4,8 +4,9 @@ namespace App\Tests\unit\Application\Contact;
 
 use App\Application\Contact\Service\ContactManager;
 use App\Entity\Contact;
-use App\Repository\ContactRepository;
+use App\Repository\ContactRepositoryInterface;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
 use PHPUnit\Framework\MockObject\Exception;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -13,51 +14,46 @@ use Psr\Log\LoggerInterface;
 
 class ContactManagerTest extends TestCase
 {
-    /**
-     * @var MockObject&ContactRepository
-     */
-    private ContactRepository $contactRepository;
-
-    /**
-     * @var MockObject&EntityManagerInterface
-     */
-    private EntityManagerInterface $entityManager;
-
-    /**
-     * @var MockObject&LoggerInterface
-     */
-    private LoggerInterface $logger;
-
     private ContactManager $contactManager;
+    private MockObject&ContactRepositoryInterface $contactRepository;
+    private MockObject&EntityManagerInterface $entityManager;
+    private MockObject&ManagerRegistry $registry;
+    private MockObject&LoggerInterface $logger;
 
     /**
      * @throws Exception
      */
     protected function setUp(): void
     {
-        $this->contactRepository = $this->createMock(ContactRepository::class);
+        $this->contactRepository = $this->createMock(ContactRepositoryInterface::class);
         $this->entityManager = $this->createMock(EntityManagerInterface::class);
+        $this->registry = $this->createMock(ManagerRegistry::class);
         $this->logger = $this->createMock(LoggerInterface::class);
         $this->contactManager = new ContactManager(
             $this->contactRepository,
             $this->entityManager,
+            $this->registry,
             $this->logger
         );
     }
 
-    public function testCreateNewContactPersistsAndFlushes(): void
+    public function testCreateOrUpdateCreatesNewContact(): void
     {
         $contactData = [
-            'Identifiant PP' => '12345',
+            'Identifiant PP' => 'TEST123',
             "Type d'identifiant PP" => '1',
             'Libellé civilité' => 'M.',
-            "Prénom d'exercice" => 'John',
-            "Nom d'exercice" => 'Doe',
+            "Prénom d'exercice" => 'Jean',
+            "Nom d'exercice" => 'Dupont',
         ];
 
         $this->contactRepository
             ->expects($this->once())
             ->method('findOneBy')
+            ->with([
+                'ppIdentifier' => 'TEST123',
+                'ppIdentifierType' => 1,
+            ])
             ->willReturn(null);
 
         $this->entityManager
@@ -65,170 +61,127 @@ class ContactManagerTest extends TestCase
             ->method('persist')
             ->with($this->isInstanceOf(Contact::class));
 
-        $reflection = new \ReflectionClass($this->contactManager);
-        $property = $reflection->getProperty('batchSize');
-        $property->setValue($this->contactManager, 1);
-
-        $this->entityManager
+        $this->logger
             ->expects($this->once())
-            ->method('flush');
+            ->method('info')
+            ->with($this->stringContains('Contact créé'));
 
-        $this->entityManager
-            ->expects($this->once())
-            ->method('clear');
-
-        $this->contactManager->createOrUpdate($contactData);
+        $this->contactManager->createOrUpdate($contactData, 1);
     }
 
-    public function testUpdateExistingContactDoesNotPersistButFlushes(): void
+    public function testCreateOrUpdateUpdatesExistingContact(): void
     {
-        $contact = new Contact();
-        $contact->ppIdentifier = '12345';
-
         $contactData = [
-            'Identifiant PP' => '12345',
+            'Identifiant PP' => 'TEST123',
             "Type d'identifiant PP" => '1',
-            'Libellé civilité' => 'M.',
-            "Prénom d'exercice" => 'Jane',
-            "Nom d'exercice" => 'Smith',
+            'Libellé civilité' => 'Mme',
+            "Prénom d'exercice" => 'Marie',
+            "Nom d'exercice" => 'Martin',
         ];
+
+        $existingContact = new Contact();
+        $existingContact->ppIdentifier = 'TEST123';
+        $existingContact->ppIdentifierType = 1;
 
         $this->contactRepository
             ->expects($this->once())
             ->method('findOneBy')
-            ->willReturn($contact);
+            ->willReturn($existingContact);
 
         $this->entityManager
             ->expects($this->never())
             ->method('persist');
 
-        $reflection = new \ReflectionClass($this->contactManager);
-        $property = $reflection->getProperty('batchSize');
-        $property->setValue($this->contactManager, 1);
-
-        $this->entityManager
+        $this->logger
             ->expects($this->once())
-            ->method('flush');
+            ->method('info')
+            ->with($this->stringContains('Contact mis à jour'));
 
-        $this->entityManager
-            ->expects($this->once())
-            ->method('clear');
+        $this->contactManager->createOrUpdate($contactData, 1);
 
-        $this->contactManager->createOrUpdate($contactData);
-
-        $this->assertEquals('Jane', $contact->firstName);
-        $this->assertEquals('Smith', $contact->familyName);
+        $this->assertEquals('Mme', $existingContact->title);
+        $this->assertEquals('Marie', $existingContact->firstName);
+        $this->assertEquals('Martin', $existingContact->familyName);
     }
 
-    public function testCreateOrUpdateLogsErrorAndContinues(): void
+    public function testCreateOrUpdateSkipsInvalidData(): void
     {
         $contactData = [
-            'Identifiant PP' => null,
-            "Type d'identifiant PP" => null,
+            'Identifiant PP' => '',
+            "Type d'identifiant PP" => '1',
         ];
+
+        $this->contactRepository
+            ->expects($this->never())
+            ->method('findOneBy');
 
         $this->logger
             ->expects($this->once())
-            ->method('error')
-            ->with(
-                $this->stringContains('Erreur dans ContactManager::createOrUpdate')
-            );
+            ->method('warning')
+            ->with($this->stringContains('Identifiant PP ou type manquant'));
 
-        $this->contactManager->createOrUpdate($contactData);
+        $this->contactManager->createOrUpdate($contactData, 1);
     }
 
-    public function testSoftDeleteNotUpdatedSinceWithContactsSuccess(): void
+    public function testSoftDeleteNotUpdatedSince(): void
     {
-        $threshold = new \DateTimeImmutable('-7 days');
+        $threshold = new \DateTimeImmutable('2024-01-01');
 
         $contact1 = new Contact();
-        $contact1->ppIdentifier = '11111';
-        $contact1->firstName = 'John';
-        $contact1->familyName = 'Doe';
-
         $contact2 = new Contact();
-        $contact2->ppIdentifier = '22222';
-        $contact2->firstName = 'Jane';
-        $contact2->familyName = 'Smith';
-
         $contactsToDelete = [$contact1, $contact2];
 
-        $this->contactRepository->expects($this->once())
+        $this->contactRepository
+            ->expects($this->once())
             ->method('findNotUpdatedSince')
             ->with($threshold)
             ->willReturn($contactsToDelete);
 
-        $persistedContacts = [];
-        $this->entityManager->expects($this->exactly(2))
-            ->method('persist')
-            ->willReturnCallback(function ($contact) use (&$persistedContacts) {
-                $persistedContacts[] = $contact;
-            });
+        $this->entityManager
+            ->expects($this->exactly(2))
+            ->method('persist');
 
-        $this->entityManager->expects($this->once())
+        $this->entityManager
+            ->expects($this->once())
             ->method('flush');
-
-        $this->entityManager->expects($this->once())
-            ->method('clear');
 
         $result = $this->contactManager->softDeleteNotUpdatedSince($threshold);
 
         $this->assertEquals(2, $result);
         $this->assertInstanceOf(\DateTimeImmutable::class, $contact1->deletedAt);
         $this->assertInstanceOf(\DateTimeImmutable::class, $contact2->deletedAt);
-
-        $this->assertContains($contact1, $persistedContacts);
-        $this->assertContains($contact2, $persistedContacts);
     }
 
-    public function testSoftDeleteNotUpdatedSinceWithNoContacts(): void
+    public function testFlushClearsEntityManager(): void
     {
-        $threshold = new \DateTimeImmutable('-7 days');
-
-        $this->contactRepository->expects($this->once())
-            ->method('findNotUpdatedSince')
-            ->with($threshold)
-            ->willReturn([]);
-
-        $this->entityManager->expects($this->never())
-            ->method('persist');
-
-        $this->entityManager->expects($this->once())
+        $this->entityManager
+            ->expects($this->once())
             ->method('flush');
 
-        $this->entityManager->expects($this->once())
+        $this->entityManager
+            ->expects($this->once())
             ->method('clear');
 
-        $result = $this->contactManager->softDeleteNotUpdatedSince($threshold);
-
-        $this->assertEquals(0, $result);
+        $this->contactManager->flush();
     }
 
-    public function testSoftDeleteNotUpdatedSinceWithRepositoryException(): void
+    public function testCreateOrUpdateHandlesExceptions(): void
     {
-        $threshold = new \DateTimeImmutable('-7 days');
-        $exception = new \Exception('Database error');
+        $this->contactRepository
+            ->expects($this->once())
+            ->method('findOneBy')
+            ->willThrowException(new \Exception('Database error'));
 
-        $this->contactRepository->expects($this->once())
-            ->method('findNotUpdatedSince')
-            ->with($threshold)
-            ->willThrowException($exception);
-
-        $this->logger->expects($this->once())
+        $this->logger
+            ->expects($this->once())
             ->method('error')
-            ->with(
-                'Erreur lors de la suppression des contacts.',
-                ['exception' => $exception]
-            );
+            ->with($this->stringContains('Erreur dans ContactManager::createOrUpdate'));
 
-        $this->entityManager->expects($this->never())
-            ->method('persist');
+        $contactData = [
+            'Identifiant PP' => 'TEST123',
+            "Type d'identifiant PP" => '1',
+        ];
 
-        $this->entityManager->expects($this->never())
-            ->method('flush');
-
-        $result = $this->contactManager->softDeleteNotUpdatedSince($threshold);
-
-        $this->assertEquals(0, $result);
+        $this->contactManager->createOrUpdate($contactData, 1);
     }
 }

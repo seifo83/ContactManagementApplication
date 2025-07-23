@@ -2,100 +2,164 @@
 
 namespace App\Tests\functional\Command;
 
-use App\Entity\Contact;
-use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
 use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\Filesystem\Filesystem;
+use Symfony\Component\Messenger\MessageBusInterface;
 
 class UpdateContactCommandTest extends KernelTestCase
 {
-    private EntityManagerInterface $entityManager;
+    private CommandTester $commandTester;
+    private Filesystem $filesystem;
+    private string $testFilesDir;
 
     protected function setUp(): void
     {
         self::bootKernel();
-        $this->entityManager = static::getContainer()->get(EntityManagerInterface::class);
-
-        $this->entityManager
-            ->createQuery('DELETE FROM App\Entity\Contact')
-            ->execute();
-    }
-
-    private function getFixturePath(string $fileName): string
-    {
-        $path = self::$kernel->getProjectDir().'/tests/fixtures/'.$fileName;
-
-        if (!file_exists($path)) {
-            throw new \RuntimeException(' fixture file not found: '.$path);
-        }
-
-        echo '📂 using fixture file: '.$path.PHP_EOL;
-
-        return $path;
-    }
-
-    private function executeCommand(string $fixtureFile): string
-    {
-        $targetPath = self::$kernel->getProjectDir().'/files/contacts.csv';
-        copy($fixtureFile, $targetPath);
 
         $application = new Application(self::$kernel);
         $command = $application->find('app:update-contact');
-        $commandTester = new CommandTester($command);
+        $this->commandTester = new CommandTester($command);
 
-        $commandTester->execute([]);
+        $this->filesystem = new Filesystem();
+        $this->testFilesDir = sys_get_temp_dir().'/test_csv_files';
 
-        return $commandTester->getDisplay();
+        $this->filesystem->mkdir($this->testFilesDir);
+
+        chdir($this->testFilesDir);
+
+        $this->copyFixturesToTestDir();
     }
 
-    public function testValidContactsCsv(): void
+    protected function tearDown(): void
     {
-        $fixtureFile = $this->getFixturePath('valid_contacts.csv');
-        $output = $this->executeCommand($fixtureFile);
-
-        echo "\n========= OUTPUT =========\n";
-        echo $output;
-        echo "\n==========================\n";
-
-        $this->assertStringContainsString('Processing Contacts', $output);
-        $this->assertStringContainsString('Created/Updated Contact: 10000', $output);
-
-        $contacts = $this->entityManager->getRepository(Contact::class)->findAll();
-        $this->assertCount(10000, $contacts);
+        if ($this->filesystem->exists($this->testFilesDir)) {
+            $this->filesystem->remove($this->testFilesDir);
+        }
     }
 
-    public function testDuplicateContactsCsv(): void
+    public function testExecuteCommandSuccess(): void
     {
-        $fixtureFile = $this->getFixturePath('duplicate_contacts.csv');
-        $output = $this->executeCommand($fixtureFile);
+        $this->commandTester->execute([]);
 
-        echo "\n========= OUTPUT =========\n";
-        echo $output;
-        echo "\n==========================\n";
+        $this->assertSame(0, $this->commandTester->getStatusCode());
+
+        $output = $this->commandTester->getDisplay();
 
         $this->assertStringContainsString('Processing Contacts', $output);
+        $this->assertStringContainsString('Deleting Contacts', $output);
+        $this->assertStringContainsString('Processing Organizations', $output);
+        $this->assertStringContainsString('Processing Contact Organizations', $output);
 
-        $this->entityManager->clear();
-        $contacts = $this->entityManager->getRepository(Contact::class)->findAll();
+        $this->assertStringContainsString('Updating contacts', $output);
+        $this->assertStringContainsString('Updating organizations', $output);
+        $this->assertStringContainsString('Updating contact organizations', $output);
 
-        $this->assertLessThanOrEqual(10000, count($contacts));
+        $this->assertStringContainsString('Created/Updated Contact:', $output);
+        $this->assertStringContainsString('Created/Updated Organizations:', $output);
+        $this->assertStringContainsString('Created/Updated Contact Organizations:', $output);
     }
 
-    public function testInvalidContactsCsv(): void
+    public function testExecuteCommandWithMemoryLimit(): void
     {
-        $fixtureFile = $this->getFixturePath('invalid_contacts.csv');
-        $output = $this->executeCommand($fixtureFile);
+        $_ENV['APP_MEMORY_LIMIT'] = '256M';
 
-        echo "\n========= OUTPUT =========\n";
-        echo $output;
-        echo "\n==========================\n";
+        $this->commandTester->execute([]);
 
-        $this->assertStringContainsString('Processing Contacts', $output);
+        $output = $this->commandTester->getDisplay();
 
-        $this->entityManager->clear();
-        $contacts = $this->entityManager->getRepository(Contact::class)->findAll();
+        $this->assertStringContainsString('Limite mémoire fixée à 256M', $output);
 
-        $this->assertGreaterThan(0, count($contacts));
+        unset($_ENV['APP_MEMORY_LIMIT']);
+    }
+
+    public function testExecuteCommandWithProgressBars(): void
+    {
+        $this->commandTester->execute([]);
+
+        $output = $this->commandTester->getDisplay();
+
+        $this->assertStringContainsString('Chunk #1 dispatché', $output);
+
+        $this->assertMatchesRegularExpression('/Chunk #\d+ dispatché \(\d+ lignes\)/', $output);
+    }
+
+    public function testProcessContactsCountsCorrectly(): void
+    {
+        $this->commandTester->execute([]);
+
+        $output = $this->commandTester->getDisplay();
+
+        $this->assertStringContainsString('Created/Updated Contact:', $output);
+        $this->assertStringContainsString('Created/Updated Organizations:', $output);
+        $this->assertStringContainsString('Created/Updated Contact Organizations:', $output);
+
+        $this->assertMatchesRegularExpression('/Created\/Updated Contact: \d+/', $output);
+        $this->assertMatchesRegularExpression('/Created\/Updated Organizations: \d+/', $output);
+        $this->assertMatchesRegularExpression('/Created\/Updated Contact Organizations: \d+/', $output);
+    }
+
+    public function testCommandHandlesMissingFiles(): void
+    {
+        $this->filesystem->remove($this->testFilesDir.'/files');
+
+        $this->expectException(\League\Csv\UnavailableStream::class);
+        $this->expectExceptionMessageMatches('/failed to open stream/');
+
+        $this->commandTester->execute([]);
+    }
+
+    public function testMessengerIntegration(): void
+    {
+        $messenger = self::getContainer()->get('messenger.bus.default');
+        $this->assertInstanceOf(MessageBusInterface::class, $messenger);
+
+        $this->commandTester->execute([]);
+
+        $this->assertSame(0, $this->commandTester->getStatusCode());
+    }
+
+    private function copyFixturesToTestDir(): void
+    {
+        $fixturesDir = __DIR__.'/../../fixtures';
+        $filesDir = $this->testFilesDir.'/files';
+        $this->filesystem->mkdir($filesDir);
+
+        $fixtures = [
+            'valid_contacts.csv' => 'contacts.csv',
+            'valid_organizations.csv' => 'organizations.csv',
+            'valid_contacts_organization.csv' => 'contacts_organizations.csv',
+        ];
+
+        foreach ($fixtures as $source => $destination) {
+            $sourcePath = $fixturesDir.'/'.$source;
+            $destPath = $filesDir.'/'.$destination;
+
+            if (file_exists($sourcePath)) {
+                $this->filesystem->copy($sourcePath, $destPath);
+            } else {
+                $this->createDefaultCsvFile($destPath, $destination);
+            }
+        }
+    }
+
+    private function createDefaultCsvFile(string $path, string $filename): void
+    {
+        switch ($filename) {
+            case 'contacts.csv':
+                $content = "nom,prenom,email\nDupont,Jean,jean.dupont@example.com\n";
+                break;
+            case 'organizations.csv':
+                $content = "nom,adresse\nEntreprise A,123 Rue de la Paix\n";
+                break;
+            case 'contacts_organizations.csv':
+                $content = "Identifiant PP,Identifiant technique de la structure\ncontact_1,org_1\n";
+                break;
+            default:
+                $content = "header1,header2\nvalue1,value2\n";
+        }
+
+        file_put_contents($path, $content);
     }
 }

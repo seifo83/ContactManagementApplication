@@ -25,6 +25,7 @@ db-reset-test:
 	APP_ENV=test php bin/console doctrine:database:create --if-not-exists
 	APP_ENV=test php bin/console doctrine:schema:create
 
+
 # 🧹 Vider le cache (env dev)
 cc:
 	php bin/console cache:clear

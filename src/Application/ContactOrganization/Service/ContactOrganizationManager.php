@@ -2,6 +2,7 @@
 
 namespace App\Application\ContactOrganization\Service;
 
+use App\Application\Common\Doctrine\DoctrineResetTrait;
 use App\Repository\ContactRepository;
 use App\Repository\OrganizationRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -10,16 +11,20 @@ use Psr\Log\LoggerInterface;
 
 class ContactOrganizationManager
 {
+    use DoctrineResetTrait;
+
     private int $batchSize = 100;
-    private int $counter = 0;
 
     public function __construct(
         private readonly ContactRepository $contactRepository,
         private readonly OrganizationRepository $organizationRepository,
-        private EntityManagerInterface $entityManager,
-        private readonly LoggerInterface $logger,
-        private readonly ManagerRegistry $registry,
+        EntityManagerInterface $entityManager,
+        ManagerRegistry $registry,
+        LoggerInterface $logger,
     ) {
+        $this->entityManager = $entityManager;
+        $this->registry = $registry;
+        $this->logger = $logger;
     }
 
     public function createOrUpdate(string $ppIdentifier, string $organizationIdentifier, int $lineNumber): void
@@ -62,33 +67,6 @@ class ContactOrganizationManager
 
         if ($this->counter >= $this->batchSize) {
             $this->flushAndResetManager();
-        }
-    }
-
-    public function flushAndResetManager(): void
-    {
-        try {
-            $this->entityManager->flush();
-            $this->entityManager->clear();
-
-            $this->entityManager->getConnection()->close();
-
-            $newManager = $this->registry->resetManager();
-
-            if (!$newManager instanceof EntityManagerInterface) {
-                throw new \LogicException('resetManager() did not return an EntityManagerInterface');
-            }
-
-            $this->entityManager = $newManager;
-
-            gc_collect_cycles();
-            $this->counter = 0;
-
-            $this->logger->info('Flush & Reset effectué avec succès.');
-        } catch (\Throwable $e) {
-            $this->logger->error('Erreur lors du flush/reset.', [
-                'exception' => $e,
-            ]);
         }
     }
 }
